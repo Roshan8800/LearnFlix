@@ -12,21 +12,10 @@ session_start();
  * @throws Exception If the API call fails.
  */
 function call_openrouter_api(array $messages, string $model_name = 'deepseek/deepseek-chat'): string {
-    // --- SECURITY WARNING ---
-    // The API keys below are hardcoded as per the user's request.
-    // For a production environment, it is strongly recommended to store these keys securely
-    // using environment variables (e.g., via getenv('MY_API_KEY')) and not in the source code.
-    $apiKeys = [
-        'deepseek/deepseek-chat' => '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',
-        'deepseek/deepseek-coder' => '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',
-        'qwen/qwen-2-7b-instruct' => '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'
-    ];
-
-    $apiKey = $apiKeys[$model_name] ?? null;
-
-    if (!$apiKey) {
-        throw new Exception("API key for model '{$model_name}' not found.");
+    if (empty($_SESSION['api_key'])) {
+        throw new Exception("API Key not set. Please set it in the Settings page.");
     }
+    $apiKey = $_SESSION['api_key'];
 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, 'https://openrouter.ai/api/v1/chat/completions');
@@ -41,10 +30,6 @@ function call_openrouter_api(array $messages, string $model_name = 'deepseek/dee
         'Authorization: Bearer ' . $apiKey
     ]);
 
-    // FIX: Bypass SSL verification for environments with certificate issues (like Termux).
-    // WARNING: This is less secure and not recommended for production.
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-
     $result = curl_exec($ch);
     $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
@@ -53,6 +38,9 @@ function call_openrouter_api(array $messages, string $model_name = 'deepseek/dee
     }
 
     if ($httpcode >= 400) {
+        if ($httpcode === 401) {
+            throw new Exception("Authentication failed (Error 401). Your API Key is likely invalid or expired. Please verify it in Settings.");
+        }
         throw new Exception("API request failed with status code {$httpcode}: {$result}");
     }
 
@@ -159,6 +147,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+// Handle POST actions from regular forms (like settings)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action'])) {
+    $action = $_POST['action'];
+
+    if ($action === 'save_api_key') {
+        $apiKey = trim($_POST['api_key'] ?? '');
+        $_SESSION['api_key'] = $apiKey;
+        $_SESSION['settings_message'] = 'API Key saved successfully!';
+        // Redirect back to settings page to show the message and prevent form resubmission
+        header('Location: index.php?screen=settings');
+        exit;
+    }
+}
+
+
 // Handle Download ZIP action (as a GET request for simplicity)
 if (isset($_GET['action']) && $_GET['action'] === 'download_zip') {
     if (!empty($_SESSION['final_code'])) {
@@ -190,7 +193,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     }
 }
 $screen = $_GET['screen'] ?? 'chat';
-if (!in_array($screen, ['chat', 'preview', 'code'])) {
+if (!in_array($screen, ['chat', 'preview', 'code', 'settings'])) {
     $screen = 'chat';
 }
 ?>
@@ -209,23 +212,27 @@ if (!in_array($screen, ['chat', 'preview', 'code'])) {
 <body class="antialiased">
     <!-- Navigation Bar -->
     <nav class="bg-gray-800/50 backdrop-blur-sm p-4 sticky top-0 z-20 shadow-lg">
-        <div class="max-w-4xl mx-auto flex justify-center items-center gap-4 md:gap-8">
+        <div class="max-w-5xl mx-auto flex justify-center items-center gap-4 md:gap-8">
             <?php
                 $preview_enabled = !empty($_SESSION['generated_preview_html']);
                 $code_enabled = !empty($_SESSION['final_code']);
             ?>
             <a href="index.php?screen=chat" class="text-sm md:text-base font-medium transition-colors <?php echo $screen === 'chat' ? 'text-blue-400' : 'text-gray-400 hover:text-white'; ?>">
-                1. AI Chat
+                AI Chat
             </a>
             <span class="text-gray-600">|</span>
             <a href="<?php echo $preview_enabled ? 'index.php?screen=preview' : '#'; ?>" class="text-sm md:text-base font-medium transition-colors
                 <?php echo $screen === 'preview' ? 'text-blue-400' : ($preview_enabled ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'); ?>">
-                2. Design Preview
+                Design Preview
             </a>
             <span class="text-gray-600">|</span>
             <a href="<?php echo $code_enabled ? 'index.php?screen=code' : '#'; ?>" class="text-sm md:text-base font-medium transition-colors
                 <?php echo $screen === 'code' ? 'text-blue-400' : ($code_enabled ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'); ?>">
-                3. View Code
+                View Code
+            </a>
+            <span class="text-gray-600 hidden md:inline">|</span>
+            <a href="index.php?screen=settings" class="text-sm md:text-base font-medium transition-colors <?php echo $screen === 'settings' ? 'text-blue-400' : 'text-gray-400 hover:text-white'; ?>">
+                Settings
             </a>
         </div>
     </nav>
@@ -238,18 +245,27 @@ if (!in_array($screen, ['chat', 'preview', 'code'])) {
                     <!-- Messages will be dynamically inserted here by JavaScript -->
                 </div>
                 <footer class="bg-gray-800 p-4">
-                    <div class="flex items-center gap-4">
-                        <button id="generate-design-btn" class="bg-green-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-500 disabled:cursor-not-allowed flex-shrink-0">
-                           Generate Design
-                        </button>
-                        <form id="chat-form" class="flex items-center gap-3 w-full">
-                            <input id="message-input" type="text" placeholder="Type your message..." class="w-full bg-gray-900 text-white p-3 rounded-lg border border-gray-600 focus:ring-2 focus:ring-blue-500 focus:outline-none transition" autocomplete="off">
-                            <button id="send-btn" type="submit" class="bg-blue-600 text-white rounded-lg p-3 hover:bg-blue-700 transition-colors flex-shrink-0 disabled:bg-gray-500 disabled:cursor-not-allowed">
-                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                    <?php if (empty($_SESSION['api_key'])): ?>
+                        <div class="text-center p-4 bg-yellow-900/50 rounded-lg border border-yellow-700">
+                            <p class="font-bold text-yellow-300">API Key Not Set</p>
+                            <p class="text-yellow-400 text-sm mt-1">
+                                Please go to the <a href="index.php?screen=settings" class="underline font-semibold hover:text-white">Settings</a> page to add your OpenRouter API key to enable the chat.
+                            </p>
+                        </div>
+                    <?php else: ?>
+                        <div class="flex items-center gap-4">
+                            <button id="generate-design-btn" class="bg-green-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-500 disabled:cursor-not-allowed flex-shrink-0">
+                               Generate Design
                             </button>
-                        </form>
-                    </div>
-                    <p id="error-message" class="text-red-400 text-sm mt-2 text-center h-4"></p>
+                            <form id="chat-form" class="flex items-center gap-3 w-full">
+                                <input id="message-input" type="text" placeholder="Type your message..." class="w-full bg-gray-900 text-white p-3 rounded-lg border border-gray-600 focus:ring-2 focus:ring-blue-500 focus:outline-none transition" autocomplete="off">
+                                <button id="send-btn" type="submit" class="bg-blue-600 text-white rounded-lg p-3 hover:bg-blue-700 transition-colors flex-shrink-0 disabled:bg-gray-500 disabled:cursor-not-allowed">
+                                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                                </button>
+                            </form>
+                        </div>
+                        <p id="error-message" class="text-red-400 text-sm mt-2 text-center h-4"></p>
+                    <?php endif; ?>
                 </footer>
             </div>
         <?php elseif ($screen === 'preview'): ?>
@@ -320,6 +336,39 @@ if (!in_array($screen, ['chat', 'preview', 'code'])) {
                         </a>
                     </div>
                 <?php endif; ?>
+            </div>
+        <?php elseif ($screen === 'settings'): ?>
+            <div id="settings-screen" class="flex flex-col items-center p-4">
+                 <header class="w-full max-w-3xl mx-auto mb-8 text-center">
+                    <h1 class="text-3xl font-bold text-white">Settings</h1>
+                    <p class="text-gray-400 mt-2">Manage your API Key here.</p>
+                </header>
+
+                <div class="w-full max-w-md bg-gray-800 p-8 rounded-lg shadow-lg">
+                    <?php
+                        // Check for and display the success message
+                        if (isset($_SESSION['settings_message'])):
+                    ?>
+                        <div class="mb-4 p-3 bg-green-900/50 border border-green-700 text-green-300 text-sm rounded-lg text-center">
+                            <?php echo $_SESSION['settings_message']; ?>
+                        </div>
+                    <?php
+                        // Unset the message so it doesn't show again
+                        unset($_SESSION['settings_message']);
+                        endif;
+                    ?>
+
+                    <form method="POST" action="index.php?screen=settings">
+                        <input type="hidden" name="action" value="save_api_key">
+                        <div class="mb-4">
+                            <label for="api_key" class="block text-gray-300 text-sm font-bold mb-2">OpenRouter API Key</label>
+                            <input type="password" name="api_key" id="api_key" value="<?php echo htmlspecialchars($_SESSION['api_key'] ?? ''); ?>" class="w-full bg-gray-900 text-white p-3 rounded-lg border border-gray-600 focus:ring-2 focus:ring-blue-500 focus:outline-none transition" placeholder="sk-or-v1-...">
+                        </div>
+                        <button type="submit" class="w-full bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors">
+                            Save API Key
+                        </button>
+                    </form>
+                </div>
             </div>
         <?php endif; ?>
     </main>
