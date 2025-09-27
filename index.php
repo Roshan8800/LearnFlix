@@ -41,6 +41,10 @@ function call_openrouter_api(array $messages, string $model_name = 'deepseek/dee
         'Authorization: Bearer ' . $apiKey
     ]);
 
+    // FIX: Bypass SSL verification for environments with certificate issues (like Termux).
+    // WARNING: This is less secure and not recommended for production.
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+
     $result = curl_exec($ch);
     $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
