@@ -1,411 +1,473 @@
 <?php
-/*
- * ====================================================================
- * PHP BACKEND LOGIC
- * ====================================================================
- * This section will handle API proxying and ZIP file generation.
+// Start the session to maintain state across requests
+session_start();
+
+// --- API & Backend Logic ---
+
+/**
+ * Sends a request to the OpenRouter API.
+ * @param array $messages The conversation history or prompt.
+ * @param string $model The AI model to use.
+ * @return string The AI's response text.
+ * @throws Exception If the API call fails.
  */
-
-// Action controller
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_GET['action'])) {
-    $action = $_GET['action'];
-
-    if ($action === 'proxy') {
-        handle_proxy();
-    } elseif ($action === 'zip') {
-        handle_zip();
-    }
-}
-
-function handle_zip() {
-    $requestBody = file_get_contents('php://input');
-    $files = json_decode($requestBody, true);
-
-    if (json_last_error() !== JSON_ERROR_NONE || !is_array($files) || empty($files)) {
-        http_response_code(400);
-        echo json_encode(['error' => 'Invalid file data provided.']);
-        exit;
-    }
-
-    $zip = new ZipArchive();
-    $zipFileName = tempnam(sys_get_temp_dir(), 'ai_design_') . '.zip';
-
-    if ($zip->open($zipFileName, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== TRUE) {
-        http_response_code(500);
-        echo json_encode(['error' => 'Failed to create ZIP archive.']);
-        exit;
-    }
-
-    foreach ($files as $fileName => $fileContent) {
-        // Sanitize filename one last time on the server
-        $safeFileName = preg_replace('/[^a-zA-Z0-9_.-]/', '', $fileName);
-        if (!empty($safeFileName)) {
-            $zip->addFromString($safeFileName, $fileContent);
-        }
-    }
-    $zip->close();
-
-    header('Content-Type: application/zip');
-    header('Content-Disposition: attachment; filename="ai_generated_design.zip"');
-    header('Content-Length: ' . filesize($zipFileName));
-    header('Connection: close');
-
-    readfile($zipFileName);
-
-    // Clean up the temporary file
-    unlink($zipFileName);
-    exit;
-}
-
-function handle_proxy() {
-    $requestBody = file_get_contents('php://input');
-    $requestData = json_decode($requestBody, true);
-
-    if (!$requestData || !isset($requestData['model']) || !isset($requestData['prompt'])) {
-        http_response_code(400);
-        echo json_encode(['error' => 'Invalid request: Missing model or prompt.']);
-        exit;
-    }
-
-    $model = $requestData['model'];
-    $prompt = $requestData['prompt'];
-
+function call_openrouter_api(array $messages, string $model_name = 'deepseek/deepseek-chat'): string {
     // --- SECURITY WARNING ---
-    // The API keys below are hardcoded as per the user's request for this specific tool.
+    // The API keys below are hardcoded as per the user's request.
     // For a production environment, it is strongly recommended to store these keys securely
     // using environment variables (e.g., via getenv('MY_API_KEY')) and not in the source code.
     $apiKeys = [
-        'deepseek/deepseek-chat' => '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', // DeepSeek V3.1
-        'deepseek/deepseek-coder' => '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',   // DeepSeek: R1 0528
-        'qwen/qwen-2-7b-instruct' => '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'   // Deepseek R1 0528 Qwen3 8B
+        'deepseek/deepseek-chat' => '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',
+        'deepseek/deepseek-coder' => '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',
+        'qwen/qwen-2-7b-instruct' => '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'
     ];
 
-    $modelMapping = [
-        'DeepSeek V3.1' => 'deepseek/deepseek-chat',
-        'DeepSeek: R1 0528' => 'deepseek/deepseek-coder',
-        'Deepseek R1 0528 Qwen3 8B' => 'qwen/qwen-2-7b-instruct',
-    ];
+    $apiKey = $apiKeys[$model_name] ?? null;
 
-    $mappedModel = isset($modelMapping[$model]) ? $modelMapping[$model] : null;
-
-    if (!$mappedModel || !isset($apiKeys[$mappedModel])) {
-        http_response_code(400);
-        echo json_encode(['error' => "Invalid model specified: {$model}"]);
-        exit;
+    if (!$apiKey) {
+        throw new Exception("API key for model '{$model_name}' not found.");
     }
-
-    $apiKey = $apiKeys[$mappedModel];
 
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, 'https://openrouter.ai/api/v1/chat/completions');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
     curl_setopt($ch, CURLOPT_POST, 1);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode([
-        'model' => $mappedModel,
-        'messages' => [['role' => 'user', 'content' => $prompt]]
+        'model' => $model_name,
+        'messages' => $messages
     ]));
-
-    $headers = [
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
         'Content-Type: application/json',
-        'Authorization: Bearer ' . $apiKey,
-        'HTTP-Referer: http://localhost', // Replace with your actual domain in production
-        'X-Title: AI UI-UX Generator'      // Replace with your app name
-    ];
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        'Authorization: Bearer ' . $apiKey
+    ]);
 
     $result = curl_exec($ch);
     $httpcode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 
     if (curl_errno($ch)) {
-        http_response_code(500);
-        echo json_encode(['error' => 'cURL Error: ' . curl_error($ch)]);
-    } else {
-        header('Content-Type: application/json');
-        http_response_code($httpcode);
-        echo $result;
+        throw new Exception('cURL Error: ' . curl_error($ch));
+    }
+
+    if ($httpcode >= 400) {
+        throw new Exception("API request failed with status code {$httpcode}: {$result}");
     }
 
     curl_close($ch);
-    exit; // Stop script execution after handling the proxy request
+
+    $response = json_decode($result, true);
+    if (json_last_error() !== JSON_ERROR_NONE || !isset($response['choices'][0]['message']['content'])) {
+        throw new Exception('Failed to decode API response or invalid response structure.');
+    }
+
+    return $response['choices'][0]['message']['content'];
 }
 
+// --- Request Handling ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    header('Content-Type: application/json');
+    // It's better to get action from a dedicated field, not from the GET param for POST requests.
+    // But for this simple app, we will use a field in the JSON body.
+    $postData = json_decode(file_get_contents('php://input'), true);
+    $action = $postData['action'] ?? null;
+
+    if ($action === 'chat') {
+        try {
+            // Initialize conversation history if it doesn't exist
+            if (!isset($_SESSION['conversation'])) {
+                $_SESSION['conversation'] = [];
+            }
+
+            // Add user message to history
+            $userMessage = $postData['message'] ?? '';
+            if (empty($userMessage)) {
+                 throw new Exception("Message cannot be empty.");
+            }
+
+            $_SESSION['conversation'][] = ['role' => 'user', 'content' => $userMessage];
+
+            // Get AI response
+            $system_prompt = ['role' => 'system', 'content' => 'You are a helpful AI Design Assistant. Your goal is to understand what kind of application the user wants to build. Keep your responses concise.'];
+            $messages_to_send = array_merge([$system_prompt], $_SESSION['conversation']);
+
+            $ai_response = call_openrouter_api($messages_to_send, 'deepseek/deepseek-chat');
+
+            // Add AI response to history
+            $_SESSION['conversation'][] = ['role' => 'assistant', 'content' => $ai_response];
+
+            echo json_encode(['success' => true, 'conversation' => $_SESSION['conversation']]);
+
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        }
+        exit; // Stop script execution
+    }
+    // Handle Design Generation
+    elseif ($action === 'generate_design') {
+        try {
+            if (empty($_SESSION['conversation'])) {
+                throw new Exception("The conversation is empty. Please chat with the AI first.");
+            }
+
+            $model_for_design = 'deepseek/deepseek-coder';
+
+            $conversation_text = implode("\n", array_map(function($msg) {
+                return "{$msg['role']}: {$msg['content']}";
+            }, $_SESSION['conversation']));
+
+            $design_prompt = [
+                [
+                    'role' => 'system',
+                    'content' => "You are a world-class frontend developer specializing in creating single-file, production-quality HTML with Tailwind CSS. Your task is to generate the complete HTML for a web application based on the following conversation. The design should be modern, professional, and mobile-first responsive. Fill the screen with relevant, high-quality placeholder content (text, images from unsplash.com, etc.). Respond with ONLY the raw HTML code. Do not include any explanations, markdown formatting, or any text outside of the HTML itself."
+                ],
+                [
+                    'role' => 'user',
+                    'content' => "Here is the conversation history. Generate the complete HTML code for the application described.\n\n---\n\n{$conversation_text}"
+                ]
+            ];
+
+            $generated_html = call_openrouter_api($design_prompt, $model_for_design);
+
+            // Clean up the response if it's wrapped in markdown
+            if (preg_match('/```html\s*([\s\S]+?)\s*```/', $generated_html, $matches)) {
+                $generated_html = $matches[1];
+            }
+
+            $_SESSION['generated_preview_html'] = $generated_html;
+            $_SESSION['final_code'] = null; // Reset final code when new preview is generated
+
+            echo json_encode(['success' => true, 'message' => 'Design generated successfully.']);
+
+        } catch (Exception $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        }
+        exit;
+    }
+    // Handle "Accept Design" from Preview screen
+    elseif ($action === 'accept_design') {
+        if (!empty($_SESSION['generated_preview_html'])) {
+            $_SESSION['final_code'] = $_SESSION['generated_preview_html'];
+        }
+        // This action happens via a standard form POST, so no JSON response is needed.
+        // The browser will be redirected to the 'code' screen by the form's action attribute.
+        return;
+    }
+}
+
+// Handle Download ZIP action (as a GET request for simplicity)
+if (isset($_GET['action']) && $_GET['action'] === 'download_zip') {
+    if (!empty($_SESSION['final_code'])) {
+        $zip = new ZipArchive();
+        $zipFileName = tempnam(sys_get_temp_dir(), 'ai_design_') . '.zip';
+
+        if ($zip->open($zipFileName, ZipArchive::CREATE) === TRUE) {
+            $zip->addFromString('index.html', $_SESSION['final_code']);
+            $zip->close();
+
+            header('Content-Type: application/zip');
+            header('Content-Disposition: attachment; filename="ai_generated_design.zip"');
+            header('Content-Length: ' . filesize($zipFileName));
+            readfile($zipFileName);
+
+            unlink($zipFileName);
+            exit;
+        }
+    }
+    // If no code, just fall through to rendering the page normally.
+}
+
+
+// --- Page Routing ---
+// We need to handle the POST action from the preview screen before routing
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'accept_design') {
+     if (!empty($_SESSION['generated_preview_html'])) {
+        $_SESSION['final_code'] = $_SESSION['generated_preview_html'];
+    }
+}
+$screen = $_GET['screen'] ?? 'chat';
+if (!in_array($screen, ['chat', 'preview', 'code'])) {
+    $screen = 'chat';
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Power UI/UX Design Generator</title>
-    <!-- This application uses Tailwind CSS via a CDN for styling. -->
+    <title>AI Application - <?php echo ucfirst($screen); ?> View</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: #111827; /* Dark background */
-            color: #d1d5db; /* Light gray text */
-        }
-        .glass-card {
-            background: rgba(31, 41, 55, 0.5); /* Semi-transparent dark card */
-            backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        #status p {
-            padding: 0.5rem 1rem;
-            border-radius: 0.5rem;
-            background-color: rgba(55, 65, 81, 0.5);
-            border-left: 4px solid #3b82f6; /* Blue accent */
-            margin-bottom: 0.5rem;
-        }
-        #status p.error {
-            border-left-color: #ef4444; /* Red accent for errors */
-            color: #fca5a5;
-        }
+        body { font-family: 'Inter', sans-serif; background-color: #111827; color: #e5e7eb; }
     </style>
 </head>
 <body class="antialiased">
-    <div class="container mx-auto p-4 md:p-8 max-w-4xl">
-        <header class="text-center mb-10">
-            <h1 class="text-4xl md:text-5xl font-bold text-white">AI Power UI/UX Design Generator</h1>
-            <p class="text-lg text-gray-400 mt-2">Transform your ideas into professional, multi-screen UI/UX designs with AI.</p>
-        </header>
+    <!-- Navigation Bar -->
+    <nav class="bg-gray-800/50 backdrop-blur-sm p-4 sticky top-0 z-20 shadow-lg">
+        <div class="max-w-4xl mx-auto flex justify-center items-center gap-4 md:gap-8">
+            <?php
+                $preview_enabled = !empty($_SESSION['generated_preview_html']);
+                $code_enabled = !empty($_SESSION['final_code']);
+            ?>
+            <a href="index.php?screen=chat" class="text-sm md:text-base font-medium transition-colors <?php echo $screen === 'chat' ? 'text-blue-400' : 'text-gray-400 hover:text-white'; ?>">
+                1. AI Chat
+            </a>
+            <span class="text-gray-600">|</span>
+            <a href="<?php echo $preview_enabled ? 'index.php?screen=preview' : '#'; ?>" class="text-sm md:text-base font-medium transition-colors
+                <?php echo $screen === 'preview' ? 'text-blue-400' : ($preview_enabled ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'); ?>">
+                2. Design Preview
+            </a>
+            <span class="text-gray-600">|</span>
+            <a href="<?php echo $code_enabled ? 'index.php?screen=code' : '#'; ?>" class="text-sm md:text-base font-medium transition-colors
+                <?php echo $screen === 'code' ? 'text-blue-400' : ($code_enabled ? 'text-gray-400 hover:text-white' : 'text-gray-600 cursor-not-allowed'); ?>">
+                3. View Code
+            </a>
+        </div>
+    </nav>
 
-        <main>
-            <div class="glass-card rounded-xl shadow-2xl p-6 md:p-8">
-                <div class="mb-6">
-                    <label for="idea" class="block text-xl font-semibold text-gray-200 mb-3">1. Describe Your Application Idea</label>
-                    <textarea id="idea" rows="4" class="w-full p-4 text-base bg-gray-900 text-gray-200 border-gray-600 rounded-lg focus:ring-4 focus:ring-blue-500 focus:border-blue-500 transition-all duration-300" placeholder="e.g., A mobile app for discovering local hiking trails with user reviews..."></textarea>
+    <!-- Main Content Area -->
+    <main class="flex-grow">
+        <?php if ($screen === 'chat'): ?>
+            <div id="chat-screen" class="flex flex-col h-[calc(100vh-64px)] max-w-3xl mx-auto">
+                <div id="chat-container" class="flex-grow p-4 space-y-6 overflow-y-auto">
+                    <!-- Messages will be dynamically inserted here by JavaScript -->
                 </div>
-
-                <button id="generateBtn" class="w-full bg-blue-600 text-white font-bold py-4 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-4 focus:ring-blue-500 focus:ring-opacity-50 transition-all duration-300 transform hover:scale-105 disabled:bg-gray-500 disabled:cursor-not-allowed">
-                    <span class="text-lg">Generate Design</span>
-                </button>
+                <footer class="bg-gray-800 p-4">
+                    <div class="flex items-center gap-4">
+                        <button id="generate-design-btn" class="bg-green-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-green-700 transition-colors disabled:bg-gray-500 disabled:cursor-not-allowed flex-shrink-0">
+                           Generate Design
+                        </button>
+                        <form id="chat-form" class="flex items-center gap-3 w-full">
+                            <input id="message-input" type="text" placeholder="Type your message..." class="w-full bg-gray-900 text-white p-3 rounded-lg border border-gray-600 focus:ring-2 focus:ring-blue-500 focus:outline-none transition" autocomplete="off">
+                            <button id="send-btn" type="submit" class="bg-blue-600 text-white rounded-lg p-3 hover:bg-blue-700 transition-colors flex-shrink-0 disabled:bg-gray-500 disabled:cursor-not-allowed">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                            </button>
+                        </form>
+                    </div>
+                    <p id="error-message" class="text-red-400 text-sm mt-2 text-center h-4"></p>
+                </footer>
             </div>
+        <?php elseif ($screen === 'preview'): ?>
+            <div id="preview-screen" class="flex flex-col items-center justify-center p-4">
+                <header class="w-full max-w-3xl mx-auto mb-8 text-center">
+                    <h1 class="text-3xl font-bold text-white">Generated Design Preview</h1>
+                </header>
 
-            <div id="progress-container" class="mt-8 hidden">
-                <div class="glass-card rounded-xl shadow-2xl p-6">
-                    <h2 class="text-2xl font-semibold mb-4 text-white">2. Generation Progress</h2>
-                    <div id="status" class="text-sm text-gray-300 space-y-2 max-h-60 overflow-y-auto pr-2"></div>
-                </div>
-            </div>
+                <?php if (!empty($_SESSION['generated_preview_html'])): ?>
+                    <p class="text-gray-400 mb-8">Here is the design the AI has created for you.</p>
+                    <!-- Mobile Mockup -->
+                    <div class="w-80 h-[560px] bg-gray-800 rounded-[40px] border-[12px] border-gray-900 shadow-2xl overflow-hidden">
+                        <iframe srcdoc="<?php echo htmlspecialchars($_SESSION['generated_preview_html']); ?>" class="w-full h-full" sandbox="allow-scripts allow-same-origin"></iframe>
+                    </div>
 
-            <div id="results-container" class="mt-8 hidden">
-                 <div class="glass-card rounded-xl shadow-2xl p-6">
-                    <h2 class="text-2xl font-semibold mb-4 text-white">3. Generated Screens</h2>
-                    <ul id="results" class="list-disc list-inside space-y-2 text-gray-300">
-                        <!-- Generated screens will be listed here -->
-                    </ul>
-                    <button id="downloadBtn" class="mt-6 w-full bg-green-600 text-white font-bold py-4 px-6 rounded-lg hover:bg-green-700 focus:outline-none focus:ring-4 focus:ring-green-500 focus:ring-opacity-50 transition-transform transform hover:scale-105 hidden">
-                        Download Source Code (ZIP)
-                    </button>
-                </div>
+                    <!-- Action Buttons -->
+                    <div class="mt-8 flex gap-4">
+                        <a href="index.php?screen=chat" class="bg-red-600 text-white font-bold py-3 px-8 rounded-lg hover:bg-red-700 transition-colors transform hover:scale-105">
+                            Go Back & Regenerate
+                        </a>
+                        <form method="POST" action="index.php?screen=code">
+                             <input type="hidden" name="action" value="accept_design">
+                             <button type="submit" class="bg-green-600 text-white font-bold py-3 px-8 rounded-lg hover:bg-green-700 transition-colors transform hover:scale-105">
+                                Accept & View Code
+                            </button>
+                        </form>
+                    </div>
+                <?php else: ?>
+                    <div class="text-center bg-gray-800 p-8 rounded-lg shadow-lg">
+                        <h2 class="text-2xl font-bold text-white">No Design Generated Yet</h2>
+                        <p class="text-gray-400 mt-4">Please go to the AI Chat screen to describe your application and generate a design.</p>
+                        <a href="index.php?screen=chat" class="mt-6 inline-block bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors">
+                            Go to Chat
+                        </a>
+                    </div>
+                <?php endif; ?>
             </div>
-        </main>
-    </div>
+        <?php elseif ($screen === 'code'): ?>
+            <div id="code-screen" class="flex flex-col items-center p-4">
+                <header class="w-full max-w-4xl mx-auto mb-8 text-center">
+                    <h1 class="text-3xl font-bold text-white">Final Source Code</h1>
+                </header>
+
+                <?php if (!empty($_SESSION['final_code'])): ?>
+                    <div class="w-full max-w-4xl bg-gray-800 rounded-xl shadow-2xl overflow-hidden">
+                        <div class="bg-gray-900 p-3 flex items-center justify-between">
+                            <span class="text-gray-400 text-sm">index.html</span>
+                            <button id="copy-btn" class="text-gray-400 hover:text-white transition-colors text-sm flex items-center gap-2">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                                Copy Code
+                            </button>
+                        </div>
+                        <pre class="max-h-[500px] overflow-y-auto p-4"><code id="code-block" class="language-html text-sm"><?php echo htmlspecialchars($_SESSION['final_code']); ?></code></pre>
+                    </div>
+
+                    <!-- Action Button -->
+                    <div class="mt-8">
+                        <a href="index.php?action=download_zip" class="bg-indigo-600 text-white font-bold py-3 px-8 rounded-lg hover:bg-indigo-700 transition-colors transform hover:scale-105">
+                            Download ZIP
+                        </a>
+                    </div>
+                <?php else: ?>
+                     <div class="text-center bg-gray-800 p-8 rounded-lg shadow-lg">
+                        <h2 class="text-2xl font-bold text-white">No Final Code Available</h2>
+                        <p class="text-gray-400 mt-4">Please generate a design and accept it on the preview screen to view the final code.</p>
+                        <a href="index.php?screen=preview" class="mt-6 inline-block bg-blue-600 text-white font-bold py-3 px-6 rounded-lg hover:bg-blue-700 transition-colors">
+                            Go to Preview
+                        </a>
+                    </div>
+                <?php endif; ?>
+            </div>
+        <?php endif; ?>
+    </main>
 
     <script>
-        /*
-         * ====================================================================
-         * JAVASCRIPT APPLICATION LOGIC
-         * ====================================================================
-         */
-        const generateBtn = document.getElementById('generateBtn');
-        const ideaTextarea = document.getElementById('idea');
-        const progressContainer = document.getElementById('progress-container');
-        const statusDiv = document.getElementById('status');
-        const resultsContainer = document.getElementById('results-container');
-        const resultsList = document.getElementById('results');
-        const downloadBtn = document.getElementById('downloadBtn');
+    if (document.getElementById('chat-screen')) {
+        const chatContainer = document.getElementById('chat-container');
+        const chatForm = document.getElementById('chat-form');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const errorMessage = document.getElementById('error-message');
 
-        let generatedFiles = {};
-
-        const MODELS = {
-            LEADER: 'DeepSeek V3.1',
-            WORKER_1: 'DeepSeek: R1 0528',
-            WORKER_2: 'Deepseek R1 0528 Qwen3 8B'
+        const renderConversation = (conversation) => {
+            chatContainer.innerHTML = '';
+            if (conversation.length === 0) {
+                chatContainer.innerHTML = `
+                <div class="flex items-start gap-3">
+                    <div class="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center font-bold text-white flex-shrink-0">AI</div>
+                    <div class="bg-gray-700 rounded-lg p-3 max-w-xs md:max-w-md">
+                        <p class="text-sm">Hello! I am your AI Design Assistant. Describe the application you want to build, and I will create it for you.</p>
+                    </div>
+                </div>`;
+                return;
+            }
+            conversation.forEach(msg => {
+                const isUser = msg.role === 'user';
+                const bubble = document.createElement('div');
+                bubble.className = `flex items-start gap-3 ${isUser ? 'justify-end' : ''}`;
+                bubble.innerHTML = `
+                    ${!isUser ? '<div class="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center font-bold text-white flex-shrink-0">AI</div>' : ''}
+                    <div class="${isUser ? 'bg-blue-600' : 'bg-gray-700'} rounded-lg p-3 max-w-xs md:max-w-md">
+                        <p class="text-sm whitespace-pre-wrap">${msg.content}</p>
+                    </div>
+                    ${isUser ? '<div class="w-10 h-10 rounded-full bg-gray-600 flex items-center justify-center font-bold text-white flex-shrink-0">You</div>' : ''}
+                `;
+                chatContainer.appendChild(bubble);
+            });
+            chatContainer.scrollTop = chatContainer.scrollHeight;
         };
 
-        function updateStatus(message, isError = false) {
-            console.log(message);
-            const statusMessage = document.createElement('p');
-            statusMessage.textContent = message;
-            if (isError) {
-                statusMessage.className = 'error';
+        const showLoadingBubble = (show = true) => {
+            let loadingBubble = document.getElementById('loading-bubble');
+            if (show && !loadingBubble) {
+                loadingBubble = document.createElement('div');
+                loadingBubble.id = 'loading-bubble';
+                loadingBubble.className = 'flex items-start gap-3';
+                loadingBubble.innerHTML = `
+                    <div class="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center font-bold text-white flex-shrink-0">AI</div>
+                    <div class="bg-gray-700 rounded-lg p-3 max-w-xs md:max-w-md">
+                        <p class="text-sm animate-pulse">...</p>
+                    </div>`;
+                chatContainer.appendChild(loadingBubble);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            } else if (!show && loadingBubble) {
+                loadingBubble.remove();
             }
-            statusDiv.appendChild(statusMessage);
-            statusDiv.scrollTop = statusDiv.scrollHeight; // Auto-scroll to the latest message
-        }
+        };
 
-        async function callAI(prompt, model, retries = 3) {
-            for (let i = 0; i < retries; i++) {
-                try {
-                    const response = await fetch('index.php?action=proxy', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-                        body: JSON.stringify({ prompt, model })
-                    });
+        let conversation = <?php echo json_encode($_SESSION['conversation'] ?? []); ?>;
+        renderConversation(conversation);
 
-                    if (!response.ok) {
-                        const errorData = await response.json().catch(() => ({ error: 'Failed to parse error response.' }));
-                        throw new Error(`API Error (${response.status}): ${errorData.error || response.statusText}`);
-                    }
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = messageInput.value.trim();
+            if (!message) return;
 
-                    const data = await response.json();
-                    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
-                        throw new Error('Invalid response structure from AI.');
-                    }
-                    return data.choices[0].message.content;
-                } catch (error) {
-                    if (i === retries - 1) {
-                        updateStatus(`Error with ${model}: ${error.message}. No retries left.`, true);
-                        throw error;
-                    }
-                    updateStatus(`Error with ${model}: ${error.message}. Retrying (${i + 1}/${retries-1})...`, true);
-                    await new Promise(res => setTimeout(res, 2000)); // Wait 2 seconds before retrying
-                }
-            }
-        }
+            messageInput.value = '';
+            messageInput.disabled = true;
+            sendBtn.disabled = true;
+            errorMessage.textContent = '';
 
-        function cleanJsonString(str) {
-            const match = str.match(/```json\n([\s\S]*?)\n```/);
-            return match ? match[1] : str;
-        }
-
-        generateBtn.addEventListener('click', async () => {
-            const userIdea = ideaTextarea.value.trim();
-            if (!userIdea) {
-                alert('Please describe your application idea first.');
-                return;
-            }
-
-            // --- 1. Reset UI ---
-            generateBtn.disabled = true;
-            generateBtn.querySelector('span').textContent = 'Generating... Please Wait';
-            progressContainer.classList.remove('hidden');
-            resultsContainer.classList.add('hidden');
-            downloadBtn.classList.add('hidden');
-            statusDiv.innerHTML = '';
-            resultsList.innerHTML = '';
-            generatedFiles = {};
+            conversation.push({ role: 'user', content: message });
+            renderConversation(conversation);
+            showLoadingBubble(true);
 
             try {
-                // --- 2. Leader Agent Creates the Plan ---
-                updateStatus('🚀 Engaging Leader Agent to create a design blueprint...');
-                const leaderPrompt = `You are a world-class Chief Design Officer. A user wants to build an application based on this idea: "${userIdea}".
-                Your task is to create a comprehensive design system and a list of all necessary screens for this application.
-                Respond with ONLY a single, raw JSON object. Do not add any introductory text, explanations, or markdown formatting.
-                The JSON object must have two top-level keys: "designSystem" and "screens".
-                - "designSystem" must be an object containing "colorPalette" (with primary, secondary, accent, background, and textColor hex codes) and "typography" (with fontFamily, baseSize, and headingFontWeight).
-                - "screens" must be an array of at least 25 detailed, unique screen names required for a complete application of this type (e.g., 'Onboarding Screen', 'Login Screen', 'User Profile Screen').`;
+                const response = await fetch('index.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'chat', message: message })
+                });
+                const data = await response.json();
+                if (!data.success) throw new Error(data.error);
 
-                const leaderResponse = await callAI(leaderPrompt, MODELS.LEADER);
-                updateStatus('✅ Blueprint received from Leader Agent.');
+                conversation = data.conversation;
+                renderConversation(conversation);
+            } catch (error) {
+                console.error('Chat error:', error);
+                errorMessage.textContent = `Error: ${error.message}`;
+                conversation.pop(); // Remove the optimistic user message on failure
+                renderConversation(conversation);
+            } finally {
+                showLoadingBubble(false);
+                messageInput.disabled = false;
+                sendBtn.disabled = false;
+                messageInput.focus();
+            }
+        });
 
-                let designPlan;
-                try {
-                    designPlan = JSON.parse(cleanJsonString(leaderResponse));
-                } catch (e) {
-                    console.error("Raw response from leader:", leaderResponse);
-                    throw new Error("Failed to parse the JSON design plan from the Leader Agent. The response was not valid JSON.");
+        const generateDesignBtn = document.getElementById('generate-design-btn');
+        generateDesignBtn.addEventListener('click', async () => {
+            generateDesignBtn.disabled = true;
+            sendBtn.disabled = true;
+            messageInput.disabled = true;
+            generateDesignBtn.textContent = 'Generating...';
+            errorMessage.textContent = '';
+
+            try {
+                const response = await fetch('index.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'generate_design' })
+                });
+
+                const data = await response.json();
+                if (!data.success) {
+                    throw new Error(data.error || 'Unknown error occurred.');
                 }
 
-                if (!designPlan.designSystem || !designPlan.screens || designPlan.screens.length < 1) {
-                    throw new Error("The design plan is invalid or missing 'designSystem' or 'screens'.");
-                }
-
-                resultsContainer.classList.remove('hidden');
-                updateStatus('📋 Plan approved. Deploying Worker Agents to generate screens...');
-
-                // --- 3. Worker Agents Generate Screens ---
-                const screensToGenerate = designPlan.screens;
-                const designSystem = designPlan.designSystem;
-
-                for (let i = 0; i < screensToGenerate.length; i++) {
-                    const screenName = screensToGenerate[i];
-                    const workerModel = (i % 2 === 0) ? MODELS.WORKER_1 : MODELS.WORKER_2;
-                    updateStatus(`[${i+1}/${screensToGenerate.length}] Assigning "${screenName}" to ${workerModel}...`);
-
-                    const workerPrompt = `You are a frontend developer creating production-quality HTML with Tailwind CSS.
-                    Your task is to create the complete HTML for the "${screenName}".
-                    You MUST adhere strictly to this design system:
-                    - Design System: ${JSON.stringify(designSystem)}
-
-                    Instructions:
-                    1. Generate a complete, single HTML file structure including <!DOCTYPE>, <html>, <head>, and <body>.
-                    2. Inside <head>, include the Tailwind CSS CDN: <script src="https://cdn.tailwindcss.com"></script>.
-                    3. Use Tailwind utility classes for all styling. For colors, use arbitrary values like \`bg-[${designSystem.colorPalette.primary}]\` and \`text-[${designSystem.colorPalette.textColor}]\`.
-                    4. The design must be modern, professional, and mobile-first responsive.
-                    5. Fill the screen with relevant, high-quality placeholder content (text, and images from services like Pexels or Unsplash).
-                    6. Respond with ONLY the raw HTML code. Do not include any explanations, markdown formatting, or any text outside of the HTML itself.`;
-
-                    const screenHtml = await callAI(workerPrompt, workerModel);
-                    const fileName = screenName.toLowerCase().replace(/[^a-z0-9]+/g, '_') + '.html';
-                    generatedFiles[fileName] = screenHtml;
-
-                    const listItem = document.createElement('li');
-                    listItem.textContent = `✅ ${screenName} (${fileName})`;
-                    listItem.className = 'text-green-400';
-                    resultsList.appendChild(listItem);
-                }
-
-                // --- 4. Finalize ---
-                updateStatus('🎉 All screens generated successfully!', false);
-                downloadBtn.classList.remove('hidden');
+                // On success, redirect to the preview page
+                window.location.href = 'index.php?screen=preview';
 
             } catch (error) {
-                updateStatus(`A critical error occurred: ${error.message}`, true);
-                console.error(error);
-            } finally {
-                generateBtn.disabled = false;
-                generateBtn.querySelector('span').textContent = 'Generate Design';
+                console.error('Design generation error:', error);
+                errorMessage.textContent = `Generation failed: ${error.message}`;
+                // Re-enable buttons on failure
+                generateDesignBtn.disabled = false;
+                sendBtn.disabled = false;
+                messageInput.disabled = false;
+                generateDesignBtn.textContent = 'Generate Design';
             }
         });
+    }
 
-        downloadBtn.addEventListener('click', () => {
-            if (Object.keys(generatedFiles).length === 0) {
-                alert('No files have been generated to download.');
-                return;
-            }
-
-            // Show loading state on download button
-            downloadBtn.textContent = 'Packaging...';
-            downloadBtn.disabled = true;
-
-            fetch('index.php?action=zip', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(generatedFiles)
-            })
-            .then(response => {
-                if (response.ok) {
-                    return response.blob();
-                }
-                // Try to get error message from backend
-                return response.json().then(errorData => {
-                    throw new Error(errorData.error || 'ZIP generation failed on the server.');
-                });
-            })
-            .then(blob => {
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.style.display = 'none';
-                a.href = url;
-                a.download = 'ai_generated_design.zip';
-                document.body.appendChild(a);
-                a.click();
-                window.URL.revokeObjectURL(url);
-                a.remove();
-            })
-            .catch(error => {
-                console.error('Error downloading ZIP:', error);
-                updateStatus(`Failed to download ZIP: ${error.message}`, true);
-            })
-            .finally(() => {
-                // Restore button state
-                downloadBtn.textContent = 'Download Source Code (ZIP)';
-                downloadBtn.disabled = false;
+    if (document.getElementById('code-screen')) {
+        const copyBtn = document.getElementById('copy-btn');
+        if (copyBtn) {
+            const codeBlock = document.getElementById('code-block');
+            copyBtn.addEventListener('click', () => {
+                navigator.clipboard.writeText(codeBlock.textContent.trim())
+                    .then(() => {
+                        const originalText = copyBtn.innerHTML;
+                        copyBtn.innerHTML = `<span class="flex items-center gap-2 text-green-400"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg> Copied!</span>`;
+                        setTimeout(() => { copyBtn.innerHTML = originalText; }, 2000);
+                    })
+                    .catch(err => {
+                        console.error('Failed to copy text: ', err);
+                        alert('Failed to copy code.');
+                    });
             });
-        });
+        }
+    }
     </script>
 </body>
 </html>
